@@ -31,6 +31,7 @@
 #include <QTimer>
 #include <QFile>
 #include <QProgressBar>
+#include <QRegularExpression>
 
 #include "synth_sdk_modules.h"
 
@@ -654,10 +655,10 @@ public:
         auto* rootLayout = new QVBoxLayout(central);
         rootLayout->setContentsMargins(6, 6, 6, 6);
 
-        // 1. TOP TOOLBAR
+        // TOP TOOLBAR
         rootLayout->addWidget(buildTopToolbar());
 
-        // 2. VERTICAL SPLITTER: TOP = [MODULE RACK | ESP32 SCREEN | INSPECTOR], BOTTOM = [OFF-SCREEN MIDI/GPIO & NOTES MATRIX]
+        // VERTICAL SPLITTER: TOP = [MODULE RACK | ESP32 SCREEN | INSPECTOR], BOTTOM = [OFF-SCREEN MIDI/GPIO & NOTES MATRIX]
         auto* mainVertSplitter = new QSplitter(Qt::Vertical, central);
 
         auto* topHorizSplitter = new QSplitter(Qt::Horizontal, mainVertSplitter);
@@ -774,6 +775,14 @@ private:
 
         lay->addStretch(1);
 
+		auto* btnLoadH = new QPushButton("Load synth_config.h", bar);
+        btnLoadH->setStyleSheet("background-color: #0D9488; color: #FFFFFF; padding: 6px 14px;");
+        connect(btnLoadH, &QPushButton::clicked, this, &SynthStudioWindow::loadHeaderDialog);
+        lay->addWidget(btnLoadH);
+
+        auto* btnExportH = new QPushButton("Export synth_config.h (ESP32 Firmware Header)", bar);
+
+		
         auto* btnExportH = new QPushButton("Export synth_config.h (ESP32 Firmware Header)", bar);
         btnExportH->setStyleSheet("background-color: #0284C7; color: #FFFFFF; padding: 6px 14px;");
         connect(btnExportH, &QPushButton::clicked, this, &SynthStudioWindow::exportHeaderDialog);
@@ -1720,7 +1729,161 @@ private:
             if (m_samplerWaveView) m_samplerWaveView->update();
         }
     }
+void loadHeaderDialog() {
+        QString fileName = QFileDialog::getOpenFileName(
+            this, "Load ESP32 Firmware Configuration Header", "", "C++ Header (*.h)");
+        if (fileName.isEmpty()) return;
 
+        QFile f(fileName);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+        QString content = QString::fromUtf8(f.readAll());
+        f.close();
+
+        // 1. Parse Synth Name & Formulas
+        auto extractStr = [&](const QString& key, std::string& target) {
+            QRegularExpression re(key + R"(\s*=\s*"((?:[^"\\]|\\.)*)"\s*;)");
+            auto m = re.match(content);
+            if (m.hasMatch()) {
+                QString val = m.captured(1);
+                val.replace("\\\"", "\"").replace("\\\\", "\\");
+                target = val.toStdString();
+            }
+        };
+        extractStr("SYNTH_NAME", m_engine->synthName);
+        extractStr("CUSTOM_OSC1_AST", m_engine->customOsc1Formula);
+        extractStr("CUSTOM_CABINET_TF", m_engine->customCabinetFormula);
+        m_edSynthName->setText(QString::fromStdString(m_engine->synthName));
+
+        // 2. Parse Board Pins
+        auto extractInt = [&](const QString& key, int& target) {
+            QRegularExpression re(key + R"(\s*=\s*(-?\d+)\s*;)");
+            auto m = re.match(content);
+            if (m.hasMatch()) target = m.captured(1).toInt();
+        };
+        extractInt("DEFAULT_I2S_BCLK", m_engine->boardPins.i2sBclk);
+        extractInt("DEFAULT_I2S_LRCK", m_engine->boardPins.i2sLrck);
+        extractInt("DEFAULT_I2S_DOUT", m_engine->boardPins.i2sDout);
+        extractInt("DEFAULT_I2C_SDA",  m_engine->boardPins.i2cSda);
+        extractInt("DEFAULT_I2C_SCL",  m_engine->boardPins.i2cScl);
+        extractInt("DEFAULT_AUDIO_MODE", m_engine->boardPins.audioOutMode);
+
+        // 3. Parse PARAMS Table
+        int pStart = content.indexOf("PARAMS[");
+        int pEnd = (pStart >= 0) ? content.indexOf("};", pStart) : -1;
+        if (pStart >= 0 && pEnd > pStart) {
+            QString pBlock = content.mid(pStart, pEnd - pStart);
+            QRegularExpression reParam(
+                R"(\{\s*(\d+)\s*,\s*"[^"]*"\s*,\s*([-\d.]+)f\s*,\s*([-\d.]+)f\s*,\s*([-\d.]+)f\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*"((?:[^"\\]|\\.)*)"\s*\})");
+            auto it = reParam.globalMatch(pBlock);
+            while (it.hasNext()) {
+                auto m = it.next();
+                int id = m.captured(1).toInt();
+                if (id >= 0 && id < PARAM_COUNT) {
+                    auto& ep = m_engine->params[id];
+                    ep.minVal       = m.captured(2).toFloat();
+                    ep.maxVal       = m.captured(3).toFloat();
+                    ep.curVal       = m.captured(4).toFloat();
+                    ep.defaultVal   = ep.curVal;
+                    ep.midiCc       = m.captured(5).toInt();
+                    ep.gpioMode     = m.captured(6).toInt();
+                    ep.gpioPinA     = m.captured(7).toInt();
+                    ep.gpioPinB     = m.captured(8).toInt();
+                    QString note    = m.captured(9);
+                    note.replace("\\\"", "\"").replace("\\\\", "\\");
+                    ep.hardwareNote = note.toStdString();
+                }
+            }
+        }
+
+        // 4. Parse ARP_STEPS
+        int aStart = content.indexOf("ARP_STEPS[");
+        int aEnd = (aStart >= 0) ? content.indexOf("};", aStart) : -1;
+        if (aStart >= 0 && aEnd > aStart) {
+            QString aBlock = content.mid(aStart, aEnd - aStart);
+            QRegularExpression reArp(R"(\{\s*(true|false)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*([-\d.]+)f\s*,\s*(true|false)\s*\})");
+            auto it = reArp.globalMatch(aBlock);
+            int idx = 0;
+            while (it.hasNext() && idx < 16) {
+                auto m = it.next();
+                m_engine->arpSteps[idx].gate     = (m.captured(1) == "true");
+                m_engine->arpSteps[idx].semitone = m.captured(2).toInt();
+                m_engine->arpSteps[idx].octave   = m.captured(3).toInt();
+                m_engine->arpSteps[idx].velocity = m.captured(4).toFloat();
+                m_engine->arpSteps[idx].slide    = (m.captured(5) == "true");
+                idx++;
+            }
+        }
+
+        // 5. Parse DRUM_TRACKS
+        int dStart = content.indexOf("DRUM_TRACKS[");
+        int dEnd = (dStart >= 0) ? content.indexOf("};", dStart) : -1;
+        if (dStart >= 0 && dEnd > dStart) {
+            QString dBlock = content.mid(dStart, dEnd - dStart);
+            QRegularExpression reDrum(R"(\{\s*(true|false)\s*,\s*([-\d.]+)f\s*,\s*([-\d.]+)f\s*,\s*([-\d.]+)f\s*,\s*0x([0-9A-Fa-f]+)\s*\})");
+            auto it = reDrum.globalMatch(dBlock);
+            int t = 0;
+            while (it.hasNext() && t < ModularSynthEngine::NUM_DRUM_TRACKS) {
+                auto m = it.next();
+                m_engine->drumTracks[t].muted = (m.captured(1) == "true");
+                m_engine->drumTracks[t].level = m.captured(2).toFloat();
+                m_engine->drumTracks[t].tune  = m.captured(3).toFloat();
+                m_engine->drumTracks[t].decay = m.captured(4).toFloat();
+                uint16_t mask = static_cast<uint16_t>(m.captured(5).toUInt(nullptr, 16));
+                for (int s = 0; s < 16; ++s) {
+                    m_engine->drumTracks[t].steps[s] = (mask & (1u << s)) != 0;
+                }
+                t++;
+            }
+        }
+
+        //  Parse Screen Widgets for all 3 Profiles
+        const char* profNames[3] = {"WIDGETS_800x480", "WIDGETS_320x240", "WIDGETS_128x64"};
+        QRegularExpression reWid(
+            R"(\{\s*(\d+)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*0x([0-9A-Fa-f]+)\s*,\s*0x([0-9A-Fa-f]+)\s*,\s*0x([0-9A-Fa-f]+)\s*\})");
+        for (int prof = 0; prof < 3; ++prof) {
+            int wStart = content.indexOf(QString(profNames[prof]) + "[");
+            int wEnd = (wStart >= 0) ? content.indexOf("};", wStart) : -1;
+            if (wStart >= 0 && wEnd > wStart) {
+                QString wBlock = content.mid(wStart, wEnd - wStart);
+                m_engine->profileWidgets[prof].clear();
+                auto it = reWid.globalMatch(wBlock);
+                int uid = 1;
+                while (it.hasNext()) {
+                    auto m = it.next();
+                    UiWidgetSpec w;
+                    w.uid        = uid++;
+                    w.type       = static_cast<WidgetType>(m.captured(1).toInt());
+                    QString lbl  = m.captured(2);
+                    lbl.replace("\\\"", "\"").replace("\\\\", "\\");
+                    w.label      = lbl.toStdString();
+                    w.x          = m.captured(3).toInt();
+                    w.y          = m.captured(4).toInt();
+                    w.w          = m.captured(5).toInt();
+                    w.h          = m.captured(6).toInt();
+                    w.paramId1   = m.captured(7).toInt();
+                    w.paramId2   = m.captured(8).toInt();
+                    w.midiNote   = m.captured(9).toInt();
+                    w.bgCol565   = static_cast<uint16_t>(m.captured(10).toUInt(nullptr, 16));
+                    w.fgCol565   = static_cast<uint16_t>(m.captured(11).toUInt(nullptr, 16));
+                    w.textCol565 = static_cast<uint16_t>(m.captured(12).toUInt(nullptr, 16));
+                    if (w.w > 0 && w.h > 0) {
+                        m_engine->profileWidgets[prof].push_back(w);
+                    }
+                }
+            }
+        }
+
+        m_engine->recompileCustomAst();
+        syncSlidersFromEngine();
+        refreshDrumGridButtons();
+        refreshArpStepControls();
+        refreshBottomRoutingTable();
+        m_canvas->selectedWidgetIdx = -1;
+        populateInspector(-1);
+        m_canvas->update();
+
+        QMessageBox::information(this, "Config Loaded", "Loaded " + fileName + " into Studio!");
+    }
     void exportHeaderDialog() {
         QString fileName = QFileDialog::getSaveFileName(
             this, "Export ESP32 Firmware Configuration Header", "synth_config.h", "C++ Header (*.h)");
