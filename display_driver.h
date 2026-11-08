@@ -35,29 +35,15 @@
 
 inline void initWaveshare7InchBacklightAndTouch() {
 #if SCREEN_PROFILE == 0
-    pinMode(4, OUTPUT);
-    digitalWrite(4, LOW);
-
     Wire.begin(8, 9, 400000);
-
-    // Configure CH422G (0x24) to output mode
     Wire.beginTransmission(0x24);
     Wire.write(0x01);
     Wire.endTransmission();
 
-    // Pull GT911 RST low while keeping LCD backlight ON (bit 2 = 0x04)
     Wire.beginTransmission(0x38);
-    Wire.write(0x04);
+    Wire.write(0x0E);
     Wire.endTransmission();
-    delay(20);
-
-    // Release GT911 RST high + Backlight ON (0x0E / 0x2E)
-    Wire.beginTransmission(0x38);
-    Wire.write(0x2E);
-    Wire.endTransmission();
-    delay(100);
-
-    pinMode(4, INPUT);
+    delay(50);
 #else
     if (TFT_SPI_BL >= 0) {
         pinMode(TFT_SPI_BL, OUTPUT);
@@ -275,13 +261,12 @@ public:
             cfg.x_max           = 799;
             cfg.y_min           = 0;
             cfg.y_max           = 479;
-            cfg.bus_shared      = false;
+            cfg.bus_shared      = true;
             cfg.offset_rotation = 0;
             cfg.i2c_port        = I2C_NUM_0;
-            cfg.i2c_addr        = 0x5D; // Waveshare GT911 default address (fallback 0x14)
             cfg.pin_sda         = GPIO_NUM_8;
             cfg.pin_scl         = GPIO_NUM_9;
-            cfg.pin_int         = -1;   // MUST be -1 on Waveshare 7" so LovyanGFX polls I2C
+            cfg.pin_int         = GPIO_NUM_4;
             cfg.pin_rst         = -1;
             cfg.freq            = 400000;
             _touch_instance.config(cfg);
