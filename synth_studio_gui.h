@@ -288,18 +288,6 @@ protected:
 
 private:
 
-	QCheckBox*   m_drumMuteChks[ModularSynthEngine::NUM_DRUM_TRACKS]  = {nullptr};
-    QSlider*     m_drumTuneSliders[ModularSynthEngine::NUM_DRUM_TRACKS] = {nullptr};
-    QSlider*     m_drumDecSliders[ModularSynthEngine::NUM_DRUM_TRACKS]  = {nullptr};
-    QComboBox*   m_arpModeCombo = nullptr;
-    QCheckBox*   m_modChks[8]     = {nullptr};
-    QComboBox*   m_modSrcBoxes[8] = {nullptr};
-    QComboBox*   m_modDstBoxes[8] = {nullptr};
-    QDoubleSpinBox* m_modAmtSpins[8] = {nullptr};
-    QTextEdit*   m_astEdit = nullptr;
-    QTextEdit*   m_tfEdit  = nullptr;
-    QSpinBox *m_spBclk = nullptr, *m_spLrck = nullptr, *m_spDout = nullptr, *m_spSda = nullptr, *m_spScl = nullptr;
-    QComboBox*   m_cbAud = nullptr;
 
 
     int m_scrW = 800, m_scrH = 480, m_scale = 1;
@@ -709,6 +697,22 @@ public:
     }
 
 private:
+
+    QCheckBox*   m_drumMuteChks[ModularSynthEngine::NUM_DRUM_TRACKS]  = {nullptr};
+    QSlider*     m_drumTuneSliders[ModularSynthEngine::NUM_DRUM_TRACKS] = {nullptr};
+    QSlider*     m_drumDecSliders[ModularSynthEngine::NUM_DRUM_TRACKS]  = {nullptr};
+    QComboBox*   m_arpModeCombo = nullptr;
+    QCheckBox*   m_modChks[8]     = {nullptr};
+    QComboBox*   m_modSrcBoxes[8] = {nullptr};
+    QComboBox*   m_modDstBoxes[8] = {nullptr};
+    QDoubleSpinBox* m_modAmtSpins[8] = {nullptr};
+    QTextEdit*   m_astEdit = nullptr;
+    QTextEdit*   m_tfEdit  = nullptr;
+    QSpinBox *m_spBclk = nullptr, *m_spLrck = nullptr, *m_spDout = nullptr, *m_spSda = nullptr, *m_spScl = nullptr;
+    QComboBox*   m_cbAud = nullptr;
+
+
+
     ModularSynthEngine* m_engine = nullptr;
     Esp32ScreenCanvas* m_canvas = nullptr;
     SamplerWaveformPreview* m_samplerWaveView = nullptr;
