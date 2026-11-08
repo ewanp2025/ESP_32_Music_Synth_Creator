@@ -800,6 +800,239 @@ public:
         return ss.str();
     }
 
+// IMPORT / LOAD FROM EXPORTED C++ HEADER (`synth_config.h`)
+    bool loadCppHeader(const std::string& src) {
+        if (src.find("GeneratedSynthConfig") == std::string::npos &&
+            src.find("PARAMS") == std::string::npos) {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        auto extractQuotedAfter = [&](const char* key, std::string& outVal) {
+            size_t pos = src.find(key);
+            if (pos == std::string::npos) return;
+            size_t q1 = src.find('"', pos);
+            if (q1 == std::string::npos) return;
+            std::string res;
+            for (size_t i = q1 + 1; i < src.size(); ++i) {
+                if (src[i] == '\\' && i + 1 < src.size()) {
+                    res += src[++i];
+                } else if (src[i] == '"') {
+                    outVal = res;
+                    return;
+                } else {
+                    res += src[i];
+                }
+            }
+        };
+
+        auto extractIntAfter = [&](const char* key, int& outVal) {
+            size_t pos = src.find(key);
+            if (pos == std::string::npos) return;
+            size_t eq = src.find('=', pos);
+            if (eq == std::string::npos) return;
+            outVal = static_cast<int>(std::strtol(src.c_str() + eq + 1, nullptr, 0));
+        };
+
+        extractQuotedAfter("SYNTH_NAME", synthName);
+        extractQuotedAfter("CUSTOM_OSC1_AST", customOsc1Formula);
+        extractQuotedAfter("CUSTOM_CABINET_TF", customCabinetFormula);
+
+        extractIntAfter("DEFAULT_I2S_BCLK", boardPins.i2sBclk);
+        extractIntAfter("DEFAULT_I2S_LRCK", boardPins.i2sLrck);
+        extractIntAfter("DEFAULT_I2S_DOUT", boardPins.i2sDout);
+        extractIntAfter("DEFAULT_I2C_SDA",  boardPins.i2cSda);
+        extractIntAfter("DEFAULT_I2C_SCL",  boardPins.i2cScl);
+        extractIntAfter("DEFAULT_AUDIO_MODE", boardPins.audioOutMode);
+
+        auto extractBlockBody = [&](const char* arrayName) -> std::string {
+            size_t pos = src.find(arrayName);
+            if (pos == std::string::npos) return {};
+            size_t eq = src.find('=', pos);
+            if (eq == std::string::npos) return {};
+            size_t openB = src.find('{', eq);
+            if (openB == std::string::npos) return {};
+            int depth = 0;
+            bool inStr = false;
+            for (size_t i = openB; i < src.size(); ++i) {
+                char c = src[i];
+                if (c == '"' && (i == 0 || src[i - 1] != '\\')) inStr = !inStr;
+                else if (!inStr) {
+                    if (c == '{') depth++;
+                    else if (c == '}') {
+                        if (--depth == 0) return src.substr(openB + 1, i - openB - 1);
+                    }
+                }
+            }
+            return {};
+        };
+
+        auto extractTuples = [](const std::string& block) -> std::vector<std::string> {
+            std::vector<std::string> rows;
+            bool inStr = false;
+            int depth = 0;
+            size_t start = 0;
+            for (size_t i = 0; i < block.size(); ++i) {
+                char c = block[i];
+                if (c == '"' && (i == 0 || block[i - 1] != '\\')) inStr = !inStr;
+                else if (!inStr) {
+                    if (c == '{') {
+                        if (depth++ == 0) start = i + 1;
+                    } else if (c == '}') {
+                        if (--depth == 0) rows.push_back(block.substr(start, i - start));
+                    }
+                }
+            }
+            return rows;
+        };
+
+        auto splitFields = [](const std::string& row) -> std::vector<std::string> {
+            std::vector<std::string> fields;
+            std::string cur;
+            bool inStr = false;
+            for (size_t i = 0; i < row.size(); ++i) {
+                char c = row[i];
+                if (c == '"' && (i == 0 || row[i - 1] != '\\')) {
+                    inStr = !inStr;
+                    cur += c;
+                } else if (c == ',' && !inStr) {
+                    fields.push_back(cur);
+                    cur.clear();
+                } else {
+                    cur += c;
+                }
+            }
+            if (!cur.empty()) fields.push_back(cur);
+            return fields;
+        };
+
+        auto unquote = [](const std::string& s) -> std::string {
+            size_t q1 = s.find('"');
+            if (q1 == std::string::npos) return {};
+            std::string res;
+            for (size_t i = q1 + 1; i < s.size(); ++i) {
+                if (s[i] == '\\' && i + 1 < s.size()) res += s[++i];
+                else if (s[i] == '"') break;
+                else res += s[i];
+            }
+            return res;
+        };
+
+        auto parseBool = [](const std::string& s) -> bool {
+            return (s.find("true") != std::string::npos) || (std::strtol(s.c_str(), nullptr, 0) != 0);
+        };
+
+        // 1. Parse PARAMS
+        for (const auto& row : extractTuples(extractBlockBody("PARAMS["))) {
+            auto f = splitFields(row);
+            if (f.size() < 10) continue;
+            int id = static_cast<int>(std::strtol(f[0].c_str(), nullptr, 0));
+            if (id < 0 || id >= PARAM_COUNT) continue;
+            params[id].minVal       = std::strtof(f[2].c_str(), nullptr);
+            params[id].maxVal       = std::strtof(f[3].c_str(), nullptr);
+            params[id].defaultVal   = std::strtof(f[4].c_str(), nullptr);
+            params[id].curVal       = params[id].defaultVal;
+            params[id].midiCc       = static_cast<int>(std::strtol(f[5].c_str(), nullptr, 0));
+            params[id].gpioMode     = static_cast<int>(std::strtol(f[6].c_str(), nullptr, 0));
+            params[id].gpioPinA     = static_cast<int>(std::strtol(f[7].c_str(), nullptr, 0));
+            params[id].gpioPinB     = static_cast<int>(std::strtol(f[8].c_str(), nullptr, 0));
+            params[id].hardwareNote = unquote(f[9]);
+        }
+
+        // 2. Parse ARP_STEPS
+        auto arpRows = extractTuples(extractBlockBody("ARP_STEPS["));
+        for (size_t i = 0; i < arpRows.size() && i < 16; ++i) {
+            auto f = splitFields(arpRows[i]);
+            if (f.size() < 5) continue;
+            arpSteps[i].gate     = parseBool(f[0]);
+            arpSteps[i].semitone = static_cast<int>(std::strtol(f[1].c_str(), nullptr, 0));
+            arpSteps[i].octave   = static_cast<int>(std::strtol(f[2].c_str(), nullptr, 0));
+            arpSteps[i].velocity = std::strtof(f[3].c_str(), nullptr);
+            arpSteps[i].slide    = parseBool(f[4]);
+        }
+
+        // 3. Parse DRUM_TRACKS
+        auto drumRows = extractTuples(extractBlockBody("DRUM_TRACKS["));
+        for (size_t t = 0; t < drumRows.size() && t < NUM_DRUM_TRACKS; ++t) {
+            auto f = splitFields(drumRows[t]);
+            if (f.size() < 5) continue;
+            drumTracks[t].muted = parseBool(f[0]);
+            drumTracks[t].level = std::strtof(f[1].c_str(), nullptr);
+            drumTracks[t].tune  = std::strtof(f[2].c_str(), nullptr);
+            drumTracks[t].decay = std::strtof(f[3].c_str(), nullptr);
+            uint16_t mask = static_cast<uint16_t>(std::strtoul(f[4].c_str(), nullptr, 0));
+            for (int s = 0; s < 16; ++s) {
+                drumTracks[t].steps[s] = (mask & (1u << s)) != 0;
+            }
+        }
+
+        // 4. Parse MOD_MATRIX
+        auto modRows = extractTuples(extractBlockBody("MOD_MATRIX["));
+        for (size_t s = 0; s < modRows.size() && s < 8; ++s) {
+            auto f = splitFields(modRows[s]);
+            if (f.size() < 4) continue;
+            modMatrix[s].enabled   = parseBool(f[0]);
+            modMatrix[s].source    = static_cast<int>(std::strtol(f[1].c_str(), nullptr, 0));
+            modMatrix[s].destParam = static_cast<int>(std::strtol(f[2].c_str(), nullptr, 0));
+            modMatrix[s].amount    = std::strtof(f[3].c_str(), nullptr);
+        }
+
+        // 5. Parse SAMPLER_8BIT_DATA
+        int smpLen = 0;
+        extractIntAfter("SAMPLER_8BIT_LEN", smpLen);
+        std::string smpBody = extractBlockBody("SAMPLER_8BIT_DATA[");
+        if (!smpBody.empty() && smpLen > 0) {
+            samplerData.clear();
+            samplerData.reserve(std::min(smpLen, MAX_SAMPLE_BYTES));
+            const char* p = smpBody.c_str();
+            while (*p && static_cast<int>(samplerData.size()) < smpLen) {
+                while (*p && !std::isdigit(static_cast<unsigned char>(*p)) && *p != '-') ++p;
+                if (!*p) break;
+                char* endP = nullptr;
+                long v = std::strtol(p, &endP, 10);
+                if (endP == p) break;
+                samplerData.push_back(static_cast<int8_t>(std::clamp<long>(v, -128, 127)));
+                p = endP;
+            }
+        }
+
+        // 6. Parse Screen Widgets for all 3 Profiles
+        const char* profKeys[3] = {"WIDGETS_800x480[", "WIDGETS_320x240[", "WIDGETS_128x64["};
+        for (int prof = 0; prof < 3; ++prof) {
+            auto wRows = extractTuples(extractBlockBody(profKeys[prof]));
+            profileWidgets[prof].clear();
+            int uid = 1;
+            for (const auto& r : wRows) {
+                auto f = splitFields(r);
+                if (f.size() < 12) continue;
+                UiWidgetSpec w;
+                w.uid        = uid++;
+                w.type       = static_cast<WidgetType>(std::strtol(f[0].c_str(), nullptr, 0));
+                w.label      = unquote(f[1]);
+                w.x          = static_cast<int>(std::strtol(f[2].c_str(), nullptr, 0));
+                w.y          = static_cast<int>(std::strtol(f[3].c_str(), nullptr, 0));
+                w.w          = static_cast<int>(std::strtol(f[4].c_str(), nullptr, 0));
+                w.h          = static_cast<int>(std::strtol(f[5].c_str(), nullptr, 0));
+                w.paramId1   = static_cast<int>(std::strtol(f[6].c_str(), nullptr, 0));
+                w.paramId2   = static_cast<int>(std::strtol(f[7].c_str(), nullptr, 0));
+                w.midiNote   = static_cast<int>(std::strtol(f[8].c_str(), nullptr, 0));
+                w.bgCol565   = static_cast<uint16_t>(std::strtoul(f[9].c_str(), nullptr, 0));
+                w.fgCol565   = static_cast<uint16_t>(std::strtoul(f[10].c_str(), nullptr, 0));
+                w.textCol565 = static_cast<uint16_t>(std::strtoul(f[11].c_str(), nullptr, 0));
+                if (w.w > 0 && w.h > 0) {
+                    profileWidgets[prof].push_back(w);
+                }
+            }
+        }
+
+        m_customAst = XpressiveParser::parse(customOsc1Formula.c_str());
+        m_cabinetFx.setFormula(customCabinetFormula.c_str());
+        return true;
+    }
+
+
+
     void loadPresetTemplate(int templateIdx) {
         std::lock_guard<std::mutex> lock(m_mutex);
         initDefaultParams();
