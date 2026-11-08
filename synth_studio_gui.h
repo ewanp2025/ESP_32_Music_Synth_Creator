@@ -287,6 +287,21 @@ protected:
     }
 
 private:
+
+	QCheckBox*   m_drumMuteChks[ModularSynthEngine::NUM_DRUM_TRACKS]  = {nullptr};
+    QSlider*     m_drumTuneSliders[ModularSynthEngine::NUM_DRUM_TRACKS] = {nullptr};
+    QSlider*     m_drumDecSliders[ModularSynthEngine::NUM_DRUM_TRACKS]  = {nullptr};
+    QComboBox*   m_arpModeCombo = nullptr;
+    QCheckBox*   m_modChks[8]     = {nullptr};
+    QComboBox*   m_modSrcBoxes[8] = {nullptr};
+    QComboBox*   m_modDstBoxes[8] = {nullptr};
+    QDoubleSpinBox* m_modAmtSpins[8] = {nullptr};
+    QTextEdit*   m_astEdit = nullptr;
+    QTextEdit*   m_tfEdit  = nullptr;
+    QSpinBox *m_spBclk = nullptr, *m_spLrck = nullptr, *m_spDout = nullptr, *m_spSda = nullptr, *m_spScl = nullptr;
+    QComboBox*   m_cbAud = nullptr;
+
+
     int m_scrW = 800, m_scrH = 480, m_scale = 1;
     bool m_dragging = false, m_resizing = false;
     QPoint m_dragOffset;
@@ -774,6 +789,11 @@ private:
 
         lay->addStretch(1);
 
+		auto* btnLoadH = new QPushButton("Load synth_config.h", bar);
+        btnLoadH->setStyleSheet("background-color: #0D9488; color: #FFFFFF; padding: 6px 14px;");
+        connect(btnLoadH, &QPushButton::clicked, this, &SynthStudioWindow::loadHeaderDialog);
+        lay->addWidget(btnLoadH);
+		
         auto* btnExportH = new QPushButton("Export synth_config.h (ESP32 Firmware Header)", bar);
         btnExportH->setStyleSheet("background-color: #0284C7; color: #FFFFFF; padding: 6px 14px;");
         connect(btnExportH, &QPushButton::clicked, this, &SynthStudioWindow::exportHeaderDialog);
@@ -1595,7 +1615,7 @@ private:
         }
     }
 
-    void refreshBottomRoutingTable() {
+void refreshBottomRoutingTable() {
         if (!m_routingTable) return;
         m_updatingTable = true;
         int prof = m_canvas ? m_canvas->activeProfile : 0;
@@ -1625,6 +1645,13 @@ private:
             }
             if (auto* modeCombo = qobject_cast<QComboBox*>(m_routingTable->cellWidget(i, 5))) {
                 modeCombo->setCurrentIndex(m_engine->params[i].gpioMode);
+            }
+            if (auto* pinW = m_routingTable->cellWidget(i, 6)) {
+                auto spins = pinW->findChildren<QSpinBox*>();
+                if (spins.size() >= 2) {
+                    spins[0]->setValue(m_engine->params[i].gpioPinA);
+                    spins[1]->setValue(m_engine->params[i].gpioPinB);
+                }
             }
             if (auto* noteEd = qobject_cast<QLineEdit*>(m_routingTable->cellWidget(i, 7))) {
                 if (noteEd->text().toStdString() != m_engine->params[i].hardwareNote) {
@@ -1720,6 +1747,71 @@ private:
             if (m_samplerWaveView) m_samplerWaveView->update();
         }
     }
+
+void loadHeaderDialog() {
+        QString fileName = QFileDialog::getOpenFileName(
+            this, "Load ESP32 Firmware Configuration Header", "synth_config.h", "C++ Header (*.h *.hpp);;All Files (*)");
+        if (fileName.isEmpty()) return;
+
+        QFile f(fileName);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QMessageBox::warning(this, "Load Failed", "Could not open file: " + fileName);
+            return;
+        }
+        std::string code = f.readAll().toStdString();
+        f.close();
+
+        if (!m_engine->loadCppHeader(code)) {
+            QMessageBox::warning(this, "Invalid Header",
+                                 "Selected file does not appear to be a valid synth_config.h file.");
+            return;
+        }
+
+        // Sync all GUI controls from loaded engine state
+        m_edSynthName->blockSignals(true);
+        m_edSynthName->setText(QString::fromStdString(m_engine->synthName));
+        m_edSynthName->blockSignals(false);
+
+        syncSlidersFromEngine();
+        refreshDrumGridButtons();
+        for (int t = 0; t < ModularSynthEngine::NUM_DRUM_TRACKS; ++t) {
+            if (m_drumMuteChks[t]) m_drumMuteChks[t]->setChecked(m_engine->drumTracks[t].muted);
+            if (m_drumTuneSliders[t]) m_drumTuneSliders[t]->setValue(static_cast<int>(m_engine->drumTracks[t].tune * 100.0f));
+            if (m_drumDecSliders[t])  m_drumDecSliders[t]->setValue(static_cast<int>(m_engine->drumTracks[t].decay * 100.0f));
+        }
+
+        refreshArpStepControls();
+        if (m_arpModeCombo) {
+            m_arpModeCombo->setCurrentIndex(static_cast<int>(m_engine->params[P_ARP_MODE].curVal));
+        }
+
+        for (int s = 0; s < 8; ++s) {
+            if (m_modChks[s])     m_modChks[s]->setChecked(m_engine->modMatrix[s].enabled);
+            if (m_modSrcBoxes[s]) m_modSrcBoxes[s]->setCurrentIndex(m_engine->modMatrix[s].source);
+            if (m_modDstBoxes[s]) m_modDstBoxes[s]->setCurrentIndex(m_engine->modMatrix[s].destParam);
+            if (m_modAmtSpins[s]) m_modAmtSpins[s]->setValue(m_engine->modMatrix[s].amount);
+        }
+
+        if (m_astEdit) m_astEdit->setPlainText(QString::fromStdString(m_engine->customOsc1Formula));
+        if (m_tfEdit)  m_tfEdit->setPlainText(QString::fromStdString(m_engine->customCabinetFormula));
+
+        if (m_spBclk) m_spBclk->setValue(m_engine->boardPins.i2sBclk);
+        if (m_spLrck) m_spLrck->setValue(m_engine->boardPins.i2sLrck);
+        if (m_spDout) m_spDout->setValue(m_engine->boardPins.i2sDout);
+        if (m_spSda)  m_spSda->setValue(m_engine->boardPins.i2cSda);
+        if (m_spScl)  m_spScl->setValue(m_engine->boardPins.i2cScl);
+        if (m_cbAud)  m_cbAud->setCurrentIndex(std::clamp(m_engine->boardPins.audioOutMode, 0, 2));
+
+        m_canvas->selectedWidgetIdx = -1;
+        populateInspector(-1);
+        refreshBottomRoutingTable();
+        if (m_samplerWaveView) m_samplerWaveView->update();
+        m_canvas->update();
+
+        QMessageBox::information(this, "Config Loaded",
+                                 "Loaded " + fileName + " into ESP32 Synth Studio!");
+    }
+
 
     void exportHeaderDialog() {
         QString fileName = QFileDialog::getSaveFileName(
